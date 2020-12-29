@@ -1,0 +1,222 @@
+From 653ee6e49b36d757b40282c1c17a84a0730cb921 Mon Sep 17 00:00:00 2001
+From: Jeff King <peff@peff.net>
+Date: Wed, 2 May 2018 17:20:08 -0400
+Subject: fsck: detect gitmodules files
+
+commit 159e7b080bfa5d34559467cacaa79df89a01afc0 upstream.
+
+In preparation for performing fsck checks on .gitmodules
+files, this commit plumbs in the actual detection of the
+files. Note that unlike most other fsck checks, this cannot
+be a property of a single object: we must know that the
+object is found at a ".gitmodules" path at the root tree of
+a commit.
+
+Since the fsck code only sees one object at a time, we have
+to mark the related objects to fit the puzzle together. When
+we see a commit we mark its tree as a root tree, and when
+we see a root tree with a .gitmodules file, we mark the
+corresponding blob to be checked.
+
+In an ideal world, we'd check the objects in topological
+order: commits followed by trees followed by blobs. In that
+case we can avoid ever loading an object twice, since all
+markings would be complete by the time we get to the marked
+objects. And indeed, if we are checking a single packfile,
+this is the order in which Git will generally write the
+objects. But we can't count on that:
+
+  1. git-fsck may show us the objects in arbitrary order
+     (loose objects are fed in sha1 order, but we may also
+     have multiple packs, and we process each pack fully in
+     sequence).
+
+  2. The type ordering is just what git-pack-objects happens
+     to write now. The pack format does not require a
+     specific order, and it's possible that future versions
+     of Git (or a custom version trying to fool official
+     Git's fsck checks!) may order it differently.
+
+  3. We may not even be fscking all of the relevant objects
+     at once. Consider pushing with transfer.fsckObjects,
+     where one push adds a blob at path "foo", and then a
+     second push adds the same blob at path ".gitmodules".
+     The blob is not part of the second push at all, but we
+     need to mark and check it.
+
+So in the general case, we need to make up to three passes
+over the objects: once to make sure we've seen all commits,
+then once to cover any trees we might have missed, and then
+a final pass to cover any .gitmodules blobs we found in the
+second pass.
+
+We can simplify things a bit by loosening the requirement
+that we find .gitmodules only at root trees. Technically
+a file like "subdir/.gitmodules" is not parsed by Git, but
+it's not unreasonable for us to declare that Git is aware of
+all ".gitmodules" files and make them eligible for checking.
+That lets us drop the root-tree requirement, which
+eliminates one pass entirely. And it makes our worst case
+much better: instead of potentially queueing every root tree
+to be re-examined, the worst case is that we queue each
+unique .gitmodules blob for a second look.
+
+This patch just adds the boilerplate to find .gitmodules
+files. The actual content checks will come in a subsequent
+commit.
+
+[jn: backported to 2.11.y:
+ - using sha1s instead of struct object_id
+ - passing oid->hash instead of oid to lookup_blob
+ - using "struct hashmap" directly since "struct oidset" isn't
+   available]
+
+Signed-off-by: Jeff King <peff@peff.net>
+Signed-off-by: Jonathan Nieder <jrnieder@gmail.com>
+---
+ fsck.c |   91 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ fsck.h |    7 +++++
+ 2 files changed, 98 insertions(+)
+
+Index: b/fsck.c
+===================================================================
+--- a/fsck.c
++++ b/fsck.c
+@@ -9,6 +9,41 @@
+ #include "refs.h"
+ #include "utf8.h"
+ #include "sha1-array.h"
++#include "hashmap.h"
++
++struct oidhash_entry {
++	struct hashmap_entry ent;
++	unsigned char sha1[20];
++};
++
++static int oidhash_hashcmp(const void *va, const void *vb,
++			   const void *vkey)
++{
++	const struct oidhash_entry *a = va, *b = vb;
++	const unsigned char *key = vkey;
++	return hashcmp(a->sha1, key ? key : b->sha1);
++}
++
++static struct hashmap gitmodules_found;
++static struct hashmap gitmodules_done;
++
++static void oidhash_insert(struct hashmap *h, const unsigned char *sha1)
++{
++	struct oidhash_entry *e;
++
++	if (!h->tablesize)
++		hashmap_init(h, oidhash_hashcmp, 0);
++	e = xmalloc(sizeof(*e));
++	hashmap_entry_init(&e->ent, sha1hash(sha1));
++	hashcpy(e->sha1, sha1);
++	hashmap_add(h, e);
++}
++
++static int oidhash_contains(struct hashmap *h, const unsigned char *sha1)
++{
++	return h->tablesize &&
++		!!hashmap_get_from_hash(h, sha1hash(sha1), sha1);
++}
+ 
+ #define FSCK_FATAL -1
+ #define FSCK_INFO -2
+@@ -43,6 +79,7 @@
+ 	FUNC(MISSING_TAG_ENTRY, ERROR) \
+ 	FUNC(MISSING_TAG_OBJECT, ERROR) \
+ 	FUNC(MISSING_TREE, ERROR) \
++	FUNC(MISSING_TREE_OBJECT, ERROR) \
+ 	FUNC(MISSING_TYPE, ERROR) \
+ 	FUNC(MISSING_TYPE_ENTRY, ERROR) \
+ 	FUNC(MULTIPLE_AUTHORS, ERROR) \
+@@ -50,6 +87,8 @@
+ 	FUNC(TREE_NOT_SORTED, ERROR) \
+ 	FUNC(UNKNOWN_TYPE, ERROR) \
+ 	FUNC(ZERO_PADDED_DATE, ERROR) \
++	FUNC(GITMODULES_MISSING, ERROR) \
++	FUNC(GITMODULES_BLOB, ERROR) \
+ 	/* warnings */ \
+ 	FUNC(BAD_FILEMODE, WARN) \
+ 	FUNC(EMPTY_NAME, WARN) \
+@@ -461,6 +500,10 @@ static int fsck_tree(struct tree *item,
+ 		has_dotdot |= !strcmp(name, "..");
+ 		has_dotgit |= is_hfs_dotgit(name) || is_ntfs_dotgit(name);
+ 		has_zero_pad |= *(char *)desc.buffer == '0';
++
++		if (is_hfs_dotgitmodules(name) || is_ntfs_dotgitmodules(name))
++			oidhash_insert(&gitmodules_found, sha1);
++
+ 		update_tree_entry(&desc);
+ 
+ 		switch (mode) {
+@@ -821,3 +864,51 @@ int fsck_error_function(struct object *o
+ 	error("object %s: %s", oid_to_hex(&obj->oid), message);
+ 	return 1;
+ }
++
++int fsck_finish(struct fsck_options *options)
++{
++	int ret = 0;
++	struct hashmap_iter iter;
++	const struct oidhash_entry *e;
++
++	hashmap_iter_init(&gitmodules_found, &iter);
++	while ((e = hashmap_iter_next(&iter))) {
++		const unsigned char *sha1 = e->sha1;
++		struct blob *blob;
++		enum object_type type;
++		unsigned long size;
++		char *buf;
++
++		if (oidhash_contains(&gitmodules_done, sha1))
++			continue;
++
++		blob = lookup_blob(sha1);
++		if (!blob) {
++			ret |= report(options, &blob->object,
++				      FSCK_MSG_GITMODULES_BLOB,
++				      "non-blob found at .gitmodules");
++			continue;
++		}
++
++		buf = read_sha1_file(sha1, &type, &size);
++		if (!buf) {
++			ret |= report(options, &blob->object,
++				      FSCK_MSG_GITMODULES_MISSING,
++				      "unable to read .gitmodules blob");
++			continue;
++		}
++
++		if (type == OBJ_BLOB)
++			ret |= fsck_blob(blob, buf, size, options);
++		else
++			ret |= report(options, &blob->object,
++				      FSCK_MSG_GITMODULES_BLOB,
++				      "non-blob found at .gitmodules");
++		free(buf);
++	}
++
++
++	hashmap_free(&gitmodules_found, 1);
++	hashmap_free(&gitmodules_done, 1);
++	return ret;
++}
+Index: b/fsck.h
+===================================================================
+--- a/fsck.h
++++ b/fsck.h
+@@ -50,4 +50,11 @@ int fsck_walk(struct object *obj, void *
+ int fsck_object(struct object *obj, void *data, unsigned long size,
+ 	struct fsck_options *options);
+ 
++/*
++ * Some fsck checks are context-dependent, and may end up queued; run this
++ * after completing all fsck_object() calls in order to resolve any remaining
++ * checks.
++ */
++int fsck_finish(struct fsck_options *options);
++
+ #endif

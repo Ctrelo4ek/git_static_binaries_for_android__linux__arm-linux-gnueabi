@@ -1,0 +1,64 @@
+From 6e328d6caef218db320978e3e251009135d87d0e Mon Sep 17 00:00:00 2001
+From: Jeff King <peff@peff.net>
+Date: Fri, 4 May 2018 19:40:08 -0400
+Subject: [PATCH 18/20] unpack-objects: call fsck_finish() after fscking
+ objects
+
+As with the previous commit, we must call fsck's "finish"
+function in order to catch any queued objects for
+.gitmodules checks.
+
+This second pass will be able to access any incoming
+objects, because we will have exploded them to loose objects
+by now.
+
+This isn't quite ideal, because it means that bad objects
+may have been written to the object database (and a
+subsequent operation could then reference them, even if the
+other side doesn't send the objects again). However, this is
+sufficient when used with receive.fsckObjects, since those
+loose objects will all be placed in a temporary quarantine
+area that will get wiped if we find any problems.
+
+Signed-off-by: Jeff King <peff@peff.net>
+---
+ builtin/unpack-objects.c   | 5 ++++-
+ t/t7415-submodule-names.sh | 7 +++++++
+ 2 files changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/builtin/unpack-objects.c b/builtin/unpack-objects.c
+index 648b952ab..c8f1406d2 100644
+--- a/builtin/unpack-objects.c
++++ b/builtin/unpack-objects.c
+@@ -572,8 +572,11 @@ int cmd_unpack_objects(int argc, const char **argv, const char *prefix)
+ 	unpack_all();
+ 	git_SHA1_Update(&ctx, buffer, offset);
+ 	git_SHA1_Final(sha1, &ctx);
+-	if (strict)
++	if (strict) {
+ 		write_rest();
++		if (fsck_finish(&fsck_options))
++			die(_("fsck error in pack objects"));
++	}
+ 	if (hashcmp(fill(20), sha1))
+ 		die("final sha1 did not match");
+ 	use(20);
+diff --git a/t/t7415-submodule-names.sh b/t/t7415-submodule-names.sh
+index c8ce2f471..7fdf5d68b 100755
+--- a/t/t7415-submodule-names.sh
++++ b/t/t7415-submodule-names.sh
+@@ -77,4 +77,11 @@ test_expect_success 'fsck detects evil superproject' '
+ 	test_must_fail git fsck
+ '
+ 
++test_expect_success 'transfer.fsckObjects detects evil superproject (unpack)' '
++	rm -rf dst.git &&
++	git init --bare dst.git &&
++	git -C dst.git config transfer.fsckObjects true &&
++	test_must_fail git push dst.git HEAD
++'
++
+ test_done
+-- 
+2.17.0
+

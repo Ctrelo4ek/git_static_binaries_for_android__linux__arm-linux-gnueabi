@@ -1,0 +1,2 @@
+# git_static_binaries_for_android__linux__arm-linux-gnueabi
+git 2.7.4 statically-linked binaries for linux that should work on android, copy them from within the folders (no release), were build on standard linux, but for the ARM architecture using 'arm-linux-gnueabi' cross-compile and glibc. note that statically linked applications requires at runtime the shared libraries from the glibc version used for linking. license is probably some gnu (source, objects, end-result included as is- not modified)

@@ -1,0 +1,45 @@
+From 1995b5e03e1cc97116be58cdc0502d4a23547856 Mon Sep 17 00:00:00 2001
+From: Jeff King <peff@peff.net>
+Date: Wed, 2 May 2018 17:20:35 -0400
+Subject: [PATCH 17/20] fsck: call fsck_finish() after fscking objects
+
+Now that the internal fsck code is capable of checking
+.gitmodules files, we just need to teach its callers to use
+the "finish" function to check any queued objects.
+
+With this, we can now catch the malicious case in t7415 with
+git-fsck.
+
+Signed-off-by: Jeff King <peff@peff.net>
+---
+ builtin/fsck.c             |    3 +++
+ t/t7415-submodule-names.sh |    4 ++++
+ 2 files changed, 7 insertions(+)
+
+Index: b/builtin/fsck.c
+===================================================================
+--- a/builtin/fsck.c
++++ b/builtin/fsck.c
+@@ -630,6 +630,9 @@ int cmd_fsck(int argc, const char **argv
+ 			fsck_object_dir(name.buf);
+ 			strbuf_release(&name);
+ 		}
++
++		if (fsck_finish(&fsck_obj_options))
++			errors_found |= ERROR_OBJECT;
+ 	}
+ 
+ 	if (check_full) {
+Index: b/t/t7415-submodule-names.sh
+===================================================================
+--- a/t/t7415-submodule-names.sh
++++ b/t/t7415-submodule-names.sh
+@@ -73,4 +73,8 @@ test_expect_success 'clone evil superpro
+ 	! grep "RUNNING POST CHECKOUT" output
+ '
+ 
++test_expect_success 'fsck detects evil superproject' '
++	test_must_fail git fsck
++'
++
+ test_done

@@ -1,0 +1,44 @@
+From db5a58c1bda5b20169b9958af1e8b05ddd178b01 Mon Sep 17 00:00:00 2001
+From: Jeff King <peff@peff.net>
+Date: Wed, 2 May 2018 16:37:09 -0400
+Subject: [PATCH 11/20] index-pack: make fsck error message more specific
+
+If fsck reports an error, we say only "Error in object".
+This isn't quite as bad as it might seem, since the fsck
+code would have dumped some errors to stderr already. But it
+might help to give a little more context. The earlier output
+would not have even mentioned "fsck", and that may be a clue
+that the "fsck.*" or "*.fsckObjects" config may be relevant.
+
+Signed-off-by: Jeff King <peff@peff.net>
+---
+ builtin/index-pack.c     |    2 +-
+ builtin/unpack-objects.c |    2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+Index: b/builtin/index-pack.c
+===================================================================
+--- a/builtin/index-pack.c
++++ b/builtin/index-pack.c
+@@ -851,7 +851,7 @@ static void sha1_object(const void *data
+ 				die(_("invalid %s"), typename(type));
+ 			if (do_fsck_object &&
+ 			    fsck_object(obj, buf, size, &fsck_options))
+-				die(_("Error in object"));
++				die(_("fsck error in packed object"));
+ 			if (fsck_walk(obj, NULL, &fsck_options))
+ 				die(_("Not all child objects of %s are reachable"), oid_to_hex(&obj->oid));
+ 
+Index: b/builtin/unpack-objects.c
+===================================================================
+--- a/builtin/unpack-objects.c
++++ b/builtin/unpack-objects.c
+@@ -208,7 +208,7 @@ static int check_object(struct object *o
+ 	if (!obj_buf)
+ 		die("Whoops! Cannot find object '%s'", oid_to_hex(&obj->oid));
+ 	if (fsck_object(obj, obj_buf->buffer, obj_buf->size, &fsck_options))
+-		die("Error in object");
++		die("fsck error in packed object");
+ 	fsck_options.walk = check_object;
+ 	if (fsck_walk(obj, NULL, &fsck_options))
+ 		die("Error on reachable objects of %s", oid_to_hex(&obj->oid));

@@ -1,0 +1,100 @@
+From b7b1fca175f1ed7933f361028c631b9ac86d868d Mon Sep 17 00:00:00 2001
+From: Jeff King <peff@peff.net>
+Date: Fri, 4 May 2018 20:03:35 -0400
+Subject: [PATCH 20/20] fsck: complain when .gitmodules is a symlink
+
+We've recently forbidden .gitmodules to be a symlink in
+verify_path(). And it's an easy way to circumvent our fsck
+checks for .gitmodules content. So let's complain when we
+see it.
+
+Signed-off-by: Jeff King <peff@peff.net>
+---
+ fsck.c                     |   14 ++++++++++----
+ t/t7415-submodule-names.sh |   29 +++++++++++++++++++++++++++++
+ 2 files changed, 39 insertions(+), 4 deletions(-)
+
+Index: b/fsck.c
+===================================================================
+--- a/fsck.c
++++ b/fsck.c
+@@ -91,6 +91,7 @@ static int oidhash_contains(struct hashm
+ 	FUNC(GITMODULES_BLOB, ERROR) \
+ 	FUNC(GITMODULES_PARSE, ERROR) \
+ 	FUNC(GITMODULES_NAME, ERROR) \
++	FUNC(GITMODULES_SYMLINK, ERROR) \
+ 	/* warnings */ \
+ 	FUNC(BAD_FILEMODE, WARN) \
+ 	FUNC(EMPTY_NAME, WARN) \
+@@ -468,7 +469,7 @@ static int verify_ordered(unsigned mode1
+ 
+ static int fsck_tree(struct tree *item, struct fsck_options *options)
+ {
+-	int retval;
++	int retval = 0;
+ 	int has_null_sha1 = 0;
+ 	int has_full_path = 0;
+ 	int has_empty_name = 0;
+@@ -503,8 +504,14 @@ static int fsck_tree(struct tree *item,
+ 		has_dotgit |= is_hfs_dotgit(name) || is_ntfs_dotgit(name);
+ 		has_zero_pad |= *(char *)desc.buffer == '0';
+ 
+-		if (is_hfs_dotgitmodules(name) || is_ntfs_dotgitmodules(name))
+-			oidhash_insert(&gitmodules_found, sha1);
++		if (is_hfs_dotgitmodules(name) || is_ntfs_dotgitmodules(name)) {
++			if (!S_ISLNK(mode))
++				oidhash_insert(&gitmodules_found, sha1);
++			else
++				retval += report(options, &item->object,
++						 FSCK_MSG_GITMODULES_SYMLINK,
++						 ".gitmodules is a symbolic link");
++		}
+ 
+ 		update_tree_entry(&desc);
+ 
+@@ -547,7 +554,6 @@ static int fsck_tree(struct tree *item,
+ 		o_name = name;
+ 	}
+ 
+-	retval = 0;
+ 	if (has_null_sha1)
+ 		retval += report(options, &item->object, FSCK_MSG_NULL_SHA1, "contains entries pointing to null sha1");
+ 	if (has_full_path)
+Index: b/t/t7415-submodule-names.sh
+===================================================================
+--- a/t/t7415-submodule-names.sh
++++ b/t/t7415-submodule-names.sh
+@@ -122,4 +122,33 @@ test_expect_success 'transfer.fsckObject
+ 	test_must_fail git -C dst.git index-pack --strict --stdin <odd.pack
+ '
+ 
++test_expect_success 'fsck detects symlinked .gitmodules file' '
++	git init symlink &&
++	(
++		cd symlink &&
++
++		# Make the tree directly to avoid index restrictions.
++		#
++		# Because symlinks store the target as a blob, choose
++		# a pathname that could be parsed as a .gitmodules file
++		# to trick naive non-symlink-aware checking.
++		tricky="[foo]bar=true" &&
++		content=$(git hash-object -w ../.gitmodules) &&
++		target=$(printf "$tricky" | git hash-object -w --stdin) &&
++		tree=$(
++			{
++				printf "100644 blob $content\t$tricky\n" &&
++				printf "120000 blob $target\t.gitmodules\n"
++			} | git mktree
++		) &&
++		commit=$(git commit-tree $tree) &&
++
++		# Check not only that we fail, but that it is due to the
++		# symlink detector; this grep string comes from the config
++		# variable name and will not be translated.
++		test_must_fail git fsck 2>output &&
++		grep gitmodulesSymlink output
++	)
++'
++
+ test_done

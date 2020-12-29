@@ -1,0 +1,32 @@
+From ed9c3220621d634d543bc4dd998d12167dfc57d4 Mon Sep 17 00:00:00 2001
+From: Jeff King <peff@peff.net>
+Date: Sun, 13 May 2018 12:35:37 -0400
+Subject: [PATCH 12/20] fsck: simplify ".git" check
+
+There's no need for us to manually check for ".git"; it's a
+subset of the other filesystem-specific tests. Dropping it
+makes our code slightly shorter. More importantly, the
+existing code may make a reader wonder why ".GIT" is not
+covered here, and whether that is a bug (it isn't, as it's
+also covered in the filesystem-specific tests).
+
+Signed-off-by: Jeff King <peff@peff.net>
+---
+ fsck.c |    4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+Index: b/fsck.c
+===================================================================
+--- a/fsck.c
++++ b/fsck.c
+@@ -459,9 +459,7 @@ static int fsck_tree(struct tree *item,
+ 		has_empty_name |= !*name;
+ 		has_dot |= !strcmp(name, ".");
+ 		has_dotdot |= !strcmp(name, "..");
+-		has_dotgit |= (!strcmp(name, ".git") ||
+-			       is_hfs_dotgit(name) ||
+-			       is_ntfs_dotgit(name));
++		has_dotgit |= is_hfs_dotgit(name) || is_ntfs_dotgit(name);
+ 		has_zero_pad |= *(char *)desc.buffer == '0';
+ 		update_tree_entry(&desc);
+ 

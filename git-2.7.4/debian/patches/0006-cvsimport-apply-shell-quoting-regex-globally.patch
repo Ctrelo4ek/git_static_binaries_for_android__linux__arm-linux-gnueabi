@@ -1,0 +1,34 @@
+From 8c87bdfb2137c9e9e945df13e2f2e1eb995ddf83 Mon Sep 17 00:00:00 2001
+From: Jeff King <peff@peff.net>
+Date: Fri, 8 Dec 2017 04:58:19 -0500
+Subject: [PATCH] cvsimport: apply shell-quoting regex globally
+
+Commit 5b4efea666 (cvsimport: shell-quote variable used in
+backticks, 2017-09-11) tried to shell-quote a variable, but
+forgot to use the "/g" modifier to apply the quoting to the
+whole variable. This means we'd miss any embedded
+single-quotes after the first one.
+
+Reported-by: <littlelailo@yahoo.com>
+Signed-off-by: Jeff King <peff@peff.net>
+Signed-off-by: Junio C Hamano <gitster@pobox.com>
+---
+ git-cvsimport.perl | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/git-cvsimport.perl b/git-cvsimport.perl
+index 36929921ea..2d8df83172 100755
+--- a/git-cvsimport.perl
++++ b/git-cvsimport.perl
+@@ -642,7 +642,7 @@ sub is_sha1 {
+ 
+ sub get_headref ($) {
+ 	my $name = shift;
+-	$name =~ s/'/'\\''/;
++	$name =~ s/'/'\\''/g;
+ 	my $r = `git rev-parse --verify '$name' 2>/dev/null`;
+ 	return undef unless $? == 0;
+ 	chomp $r;
+-- 
+2.17.1
+

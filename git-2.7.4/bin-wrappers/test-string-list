@@ -1,0 +1,28 @@
+#!/bin/sh
+
+# wrap-for-bin.sh: Template for git executable wrapper scripts
+# to run test suite against sandbox, but with only bindir-installed
+# executables in PATH.  The Makefile copies this into various
+# files in bin-wrappers, substituting
+# /home/me/Desktop/1/git-2.7.4 and test-string-list.
+
+GIT_EXEC_PATH='/home/me/Desktop/1/git-2.7.4'
+if test -n "$NO_SET_GIT_TEMPLATE_DIR"
+then
+	unset GIT_TEMPLATE_DIR
+else
+	GIT_TEMPLATE_DIR='/home/me/Desktop/1/git-2.7.4/templates/blt'
+	export GIT_TEMPLATE_DIR
+fi
+GITPERLLIB='/home/me/Desktop/1/git-2.7.4/perl/blib/lib'"${GITPERLLIB:+:$GITPERLLIB}"
+GIT_TEXTDOMAINDIR='/home/me/Desktop/1/git-2.7.4/po/build/locale'
+PATH='/home/me/Desktop/1/git-2.7.4/bin-wrappers:'"$PATH"
+export GIT_EXEC_PATH GITPERLLIB PATH GIT_TEXTDOMAINDIR
+
+if test -n "$GIT_TEST_GDB"
+then
+	unset GIT_TEST_GDB
+	exec gdb --args "${GIT_EXEC_PATH}/test-string-list" "$@"
+else
+	exec "${GIT_EXEC_PATH}/test-string-list" "$@"
+fi

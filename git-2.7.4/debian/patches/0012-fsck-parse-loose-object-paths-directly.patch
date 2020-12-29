@@ -1,0 +1,122 @@
+From c68b489e56431cf27f7719913ab09ddc62f95912 Mon Sep 17 00:00:00 2001
+From: Jeff King <peff@peff.net>
+Date: Fri, 13 Jan 2017 12:59:44 -0500
+Subject: [PATCH] fsck: parse loose object paths directly
+
+When we iterate over the list of loose objects to check, we
+get the actual path of each object. But we then throw it
+away and pass just the sha1 to fsck_sha1(), which will do a
+fresh lookup. Usually it would find the same object, but it
+may not if an object exists both as a loose and a packed
+object. We may end up checking the packed object twice, and
+never look at the loose one.
+
+In practice this isn't too terrible, because if fsck doesn't
+complain, it means you have at least one good copy. But
+since the point of fsck is to look for corruption, we should
+be thorough.
+
+The new read_loose_object() interface can help us get the
+data from disk, and then we replace parse_object() with
+parse_object_buffer(). As a bonus, our error messages now
+mention the path to a corrupted object, which should make it
+easier to track down errors when they do happen.
+
+Signed-off-by: Jeff King <peff@peff.net>
+Signed-off-by: Junio C Hamano <gitster@pobox.com>
+---
+ builtin/fsck.c  |   46 +++++++++++++++++++++++++++++++++-------------
+ t/t1450-fsck.sh |   16 ++++++++++++++++
+ 2 files changed, 49 insertions(+), 13 deletions(-)
+
+Index: b/builtin/fsck.c
+===================================================================
+--- a/builtin/fsck.c
++++ b/builtin/fsck.c
+@@ -341,18 +341,6 @@ static int fsck_obj(struct object *obj)
+ 	return 0;
+ }
+ 
+-static int fsck_sha1(const unsigned char *sha1)
+-{
+-	struct object *obj = parse_object(sha1);
+-	if (!obj) {
+-		errors_found |= ERROR_OBJECT;
+-		return error("%s: object corrupt or missing",
+-			     sha1_to_hex(sha1));
+-	}
+-	obj->flags |= HAS_OBJ;
+-	return fsck_obj(obj);
+-}
+-
+ static int fsck_obj_buffer(const unsigned char *sha1, enum object_type type,
+ 			   unsigned long size, void *buffer, int *eaten)
+ {
+@@ -455,9 +443,41 @@ static void get_default_heads(void)
+ 	}
+ }
+ 
++static struct object *parse_loose_object(const unsigned char *sha1,
++					 const char *path)
++{
++	struct object *obj;
++	void *contents;
++	enum object_type type;
++	unsigned long size;
++	int eaten;
++
++	if (read_loose_object(path, sha1, &type, &size, &contents) < 0)
++		return NULL;
++
++	if (!contents && type != OBJ_BLOB)
++		die("BUG: read_loose_object streamed a non-blob");
++
++	obj = parse_object_buffer(sha1, type, size, contents, &eaten);
++
++	if (!eaten)
++		free(contents);
++	return obj;
++}
++
+ static int fsck_loose(const unsigned char *sha1, const char *path, void *data)
+ {
+-	if (fsck_sha1(sha1))
++	struct object *obj = parse_loose_object(sha1, path);
++
++	if (!obj) {
++		errors_found |= ERROR_OBJECT;
++		error("%s: object corrupt or missing: %s",
++		      sha1_to_hex(sha1), path);
++		return 0; /* keep checking other objects */
++	}
++
++	obj->flags = HAS_OBJ;
++	if (fsck_obj(obj))
+ 		errors_found |= ERROR_OBJECT;
+ 	return 0;
+ }
+Index: b/t/t1450-fsck.sh
+===================================================================
+--- a/t/t1450-fsck.sh
++++ b/t/t1450-fsck.sh
+@@ -505,4 +505,20 @@ test_expect_success 'fsck --connectivity
+ 	)
+ '
+ 
++test_expect_success 'fsck finds problems in duplicate loose objects' '
++	rm -rf broken-duplicate &&
++	git init broken-duplicate &&
++	(
++		cd broken-duplicate &&
++		test_commit duplicate &&
++		# no "-d" here, so we end up with duplicates
++		git repack &&
++		# now corrupt the loose copy
++		file=$(sha1_file "$(git rev-parse HEAD)") &&
++		rm "$file" &&
++		echo broken >"$file" &&
++		test_must_fail git fsck
++	)
++'
++
+ test_done

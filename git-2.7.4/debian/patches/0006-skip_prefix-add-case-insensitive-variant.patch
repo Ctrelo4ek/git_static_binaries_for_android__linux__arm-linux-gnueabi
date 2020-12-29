@@ -1,0 +1,48 @@
+From 41a80924aec0e94309786837b6f954a3b3f19b71 Mon Sep 17 00:00:00 2001
+From: Jeff King <peff@peff.net>
+Date: Sun, 13 May 2018 12:57:14 -0400
+Subject: [PATCH 06/20] skip_prefix: add case-insensitive variant
+
+We have the convenient skip_prefix() helper, but if you want
+to do case-insensitive matching, you're stuck doing it by
+hand. We could add an extra parameter to the function to
+let callers ask for this, but the function is small and
+somewhat performance-critical. Let's just re-implement it
+for the case-insensitive version.
+
+Signed-off-by: Jeff King <peff@peff.net>
+---
+ git-compat-util.h | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/git-compat-util.h b/git-compat-util.h
+index 59866d72f..4be15e5eb 100644
+--- a/git-compat-util.h
++++ b/git-compat-util.h
+@@ -956,6 +956,23 @@ static inline int sane_iscase(int x, int is_lower)
+ 		return (x & 0x20) == 0;
+ }
+ 
++/*
++ * Like skip_prefix, but compare case-insensitively. Note that the comparison
++ * is done via tolower(), so it is strictly ASCII (no multi-byte characters or
++ * locale-specific conversions).
++ */
++static inline int skip_iprefix(const char *str, const char *prefix,
++			       const char **out)
++{
++	do {
++		if (!*prefix) {
++			*out = str;
++			return 1;
++		}
++	} while (tolower(*str++) == tolower(*prefix++));
++	return 0;
++}
++
+ static inline int strtoul_ui(char const *s, int base, unsigned int *result)
+ {
+ 	unsigned long ul;
+-- 
+2.17.0
+

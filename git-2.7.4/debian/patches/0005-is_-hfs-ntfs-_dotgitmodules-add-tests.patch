@@ -1,0 +1,157 @@
+From dc2d9ba3187fcd0ca8eeab9aa9ddef70cf8627a6 Mon Sep 17 00:00:00 2001
+From: Johannes Schindelin <johannes.schindelin@gmx.de>
+Date: Sat, 12 May 2018 22:16:51 +0200
+Subject: [PATCH 05/20] is_{hfs,ntfs}_dotgitmodules: add tests
+
+This tests primarily for NTFS issues, but also adds one example of an
+HFS+ issue.
+
+Thanks go to Congyi Wu for coming up with the list of examples where
+NTFS would possibly equate the filename with `.gitmodules`.
+
+Signed-off-by: Johannes Schindelin <johannes.schindelin@gmx.de>
+Signed-off-by: Jeff King <peff@peff.net>
+---
+ t/t0060-path-utils.sh |   86 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ test-path-utils.c     |   20 +++++++++++
+ 2 files changed, 106 insertions(+)
+
+Index: b/test-path-utils.c
+===================================================================
+--- a/test-path-utils.c
++++ b/test-path-utils.c
+@@ -1,5 +1,6 @@
+ #include "cache.h"
+ #include "string-list.h"
++#include "utf8.h"
+ 
+ /*
+  * A "string_list_each_func_t" function that normalizes an entry from
+@@ -156,6 +157,11 @@ static struct test_data dirname_data[] =
+ 	{ NULL,              NULL     }
+ };
+ 
++static int is_dotgitmodules(const char *path)
++{
++	return is_hfs_dotgitmodules(path) || is_ntfs_dotgitmodules(path);
++}
++
+ int main(int argc, char **argv)
+ {
+ 	if (argc == 3 && !strcmp(argv[1], "normalize_path_copy")) {
+@@ -256,6 +262,20 @@ int main(int argc, char **argv)
+ 	if (argc == 2 && !strcmp(argv[1], "dirname"))
+ 		return test_function(dirname_data, dirname, argv[1]);
+ 
++	if (argc > 2 && !strcmp(argv[1], "is_dotgitmodules")) {
++		int res = 0, expect = 1, i;
++		for (i = 2; i < argc; i++)
++			if (!strcmp("--not", argv[i]))
++				expect = !expect;
++			else if (expect != is_dotgitmodules(argv[i]))
++				res = error("'%s' is %s.gitmodules", argv[i],
++					    expect ? "not " : "");
++			else
++				fprintf(stderr, "ok: '%s' is %s.gitmodules\n",
++					argv[i], expect ? "" : "not ");
++		return !!res;
++	}
++
+ 	fprintf(stderr, "%s: unknown function name: %s\n", argv[0],
+ 		argv[1] ? argv[1] : "(there was none)");
+ 	return 1;
+Index: b/t/t0060-path-utils.sh
+===================================================================
+--- a/t/t0060-path-utils.sh
++++ b/t/t0060-path-utils.sh
+@@ -289,4 +289,90 @@ test_git_path GIT_COMMON_DIR=bar config
+ test_git_path GIT_COMMON_DIR=bar packed-refs              bar/packed-refs
+ test_git_path GIT_COMMON_DIR=bar shallow                  bar/shallow
+ 
++test_expect_success 'match .gitmodules' '
++	test-path-utils is_dotgitmodules \
++		.gitmodules \
++		\
++		.git${u200c}modules \
++		\
++		.Gitmodules \
++		.gitmoduleS \
++		\
++		".gitmodules " \
++		".gitmodules." \
++		".gitmodules  " \
++		".gitmodules. " \
++		".gitmodules ." \
++		".gitmodules.." \
++		".gitmodules   " \
++		".gitmodules.  " \
++		".gitmodules . " \
++		".gitmodules  ." \
++		\
++		".Gitmodules " \
++		".Gitmodules." \
++		".Gitmodules  " \
++		".Gitmodules. " \
++		".Gitmodules ." \
++		".Gitmodules.." \
++		".Gitmodules   " \
++		".Gitmodules.  " \
++		".Gitmodules . " \
++		".Gitmodules  ." \
++		\
++		GITMOD~1 \
++		gitmod~1 \
++		GITMOD~2 \
++		gitmod~3 \
++		GITMOD~4 \
++		\
++		"GITMOD~1 " \
++		"gitmod~2." \
++		"GITMOD~3  " \
++		"gitmod~4. " \
++		"GITMOD~1 ." \
++		"gitmod~2   " \
++		"GITMOD~3.  " \
++		"gitmod~4 . " \
++		\
++		GI7EBA~1 \
++		gi7eba~9 \
++		\
++		GI7EB~10 \
++		GI7EB~11 \
++		GI7EB~99 \
++		GI7EB~10 \
++		GI7E~100 \
++		GI7E~101 \
++		GI7E~999 \
++		~1000000 \
++		~9999999 \
++		\
++		--not \
++		".gitmodules x"  \
++		".gitmodules .x" \
++		\
++		" .gitmodules" \
++		\
++		..gitmodules \
++		\
++		gitmodules \
++		\
++		.gitmodule \
++		\
++		".gitmodules x " \
++		".gitmodules .x" \
++		\
++		GI7EBA~ \
++		GI7EBA~0 \
++		GI7EBA~~1 \
++		GI7EBA~X \
++		Gx7EBA~1 \
++		GI7EBX~1 \
++		\
++		GI7EB~1 \
++		GI7EB~01 \
++		GI7EB~1X
++'
++
+ test_done

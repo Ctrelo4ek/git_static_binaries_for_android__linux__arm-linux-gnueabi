@@ -1,0 +1,203 @@
+From 10ecfa76491e4923988337b2e2243b05376b40de Mon Sep 17 00:00:00 2001
+From: Jeff King <peff@peff.net>
+Date: Fri, 4 May 2018 20:03:35 -0400
+Subject: [PATCH 10/20] verify_path: disallow symlinks in .gitmodules
+
+There are a few reasons it's not a good idea to make
+.gitmodules a symlink, including:
+
+  1. It won't be portable to systems without symlinks.
+
+  2. It may behave inconsistently, since Git may look at
+     this file in the index or a tree without bothering to
+     resolve any symbolic links. We don't do this _yet_, but
+     the config infrastructure is there and it's planned for
+     the future.
+
+With some clever code, we could make (2) work. And some
+people may not care about (1) if they only work on one
+platform. But there are a few security reasons to simply
+disallow it:
+
+  a. A symlinked .gitmodules file may circumvent any fsck
+     checks of the content.
+
+  b. Git may read and write from the on-disk file without
+     sanity checking the symlink target. So for example, if
+     you link ".gitmodules" to "../oops" and run "git
+     submodule add", we'll write to the file "oops" outside
+     the repository.
+
+Again, both of those are problems that _could_ be solved
+with sufficient code, but given the complications in (1) and
+(2), we're better off just outlawing it explicitly.
+
+Note the slightly tricky call to verify_path() in
+update-index's update_one(). There we may not have a mode if
+we're not updating from the filesystem (e.g., we might just
+be removing the file). Passing "0" as the mode there works
+fine; since it's not a symlink, we'll just skip the extra
+checks.
+
+Signed-off-by: Jeff King <peff@peff.net>
+---
+ builtin/apply.c        |    4 ++--
+ builtin/update-index.c |    6 +++---
+ cache.h                |    2 +-
+ read-cache.c           |   40 +++++++++++++++++++++++++++++++---------
+ 4 files changed, 37 insertions(+), 15 deletions(-)
+
+Index: b/builtin/apply.c
+===================================================================
+--- a/builtin/apply.c
++++ b/builtin/apply.c
+@@ -3685,9 +3685,9 @@ static void die_on_unsafe_path(struct pa
+ 	if (!patch->is_delete)
+ 		new_name = patch->new_name;
+ 
+-	if (old_name && !verify_path(old_name))
++	if (old_name && !verify_path(old_name, patch->old_mode))
+ 		die(_("invalid path '%s'"), old_name);
+-	if (new_name && !verify_path(new_name))
++	if (new_name && !verify_path(new_name, patch->new_mode))
+ 		die(_("invalid path '%s'"), new_name);
+ }
+ 
+Index: b/builtin/update-index.c
+===================================================================
+--- a/builtin/update-index.c
++++ b/builtin/update-index.c
+@@ -386,7 +386,7 @@ static int add_cacheinfo(unsigned int mo
+ 	int size, len, option;
+ 	struct cache_entry *ce;
+ 
+-	if (!verify_path(path))
++	if (!verify_path(path, mode))
+ 		return error("Invalid path '%s'", path);
+ 
+ 	len = strlen(path);
+@@ -451,7 +451,7 @@ static void update_one(const char *path)
+ 		stat_errno = errno;
+ 	} /* else stat is valid */
+ 
+-	if (!verify_path(path)) {
++	if (!verify_path(path, st.st_mode)) {
+ 		fprintf(stderr, "Ignoring path %s\n", path);
+ 		return;
+ 	}
+@@ -539,7 +539,7 @@ static void read_index_info(int line_ter
+ 			path_name = uq.buf;
+ 		}
+ 
+-		if (!verify_path(path_name)) {
++		if (!verify_path(path_name, mode)) {
+ 			fprintf(stderr, "Ignoring path %s\n", path_name);
+ 			continue;
+ 		}
+Index: b/cache.h
+===================================================================
+--- a/cache.h
++++ b/cache.h
+@@ -559,7 +559,7 @@ extern int read_index_unmerged(struct in
+ extern int write_locked_index(struct index_state *, struct lock_file *lock, unsigned flags);
+ extern int discard_index(struct index_state *);
+ extern int unmerged_index(const struct index_state *);
+-extern int verify_path(const char *path);
++extern int verify_path(const char *path, unsigned mode);
+ extern int index_dir_exists(struct index_state *istate, const char *name, int namelen);
+ extern void adjust_dirname_case(struct index_state *istate, char *name);
+ extern struct cache_entry *index_file_exists(struct index_state *istate, const char *name, int namelen, int igncase);
+Index: b/read-cache.c
+===================================================================
+--- a/read-cache.c
++++ b/read-cache.c
+@@ -735,7 +735,7 @@ struct cache_entry *make_cache_entry(uns
+ 	int size, len;
+ 	struct cache_entry *ce, *ret;
+ 
+-	if (!verify_path(path)) {
++	if (!verify_path(path, mode)) {
+ 		error("Invalid path '%s'", path);
+ 		return NULL;
+ 	}
+@@ -770,7 +770,7 @@ int ce_same_name(const struct cache_entr
+  * Also, we don't want double slashes or slashes at the
+  * end that can make pathnames ambiguous.
+  */
+-static int verify_dotfile(const char *rest)
++static int verify_dotfile(const char *rest, unsigned mode)
+ {
+ 	/*
+ 	 * The first character was '.', but that
+@@ -788,6 +788,9 @@ static int verify_dotfile(const char *re
+ 	 * case-insensitively here, even if ignore_case is not set.
+ 	 * This outlaws ".GIT" everywhere out of an abundance of caution,
+ 	 * since there's really no good reason to allow it.
++	 *
++	 * Once we've seen ".git", we can also find ".gitmodules", etc (also
++	 * case-insensitively).
+ 	 */
+ 	case 'g':
+ 	case 'G':
+@@ -797,6 +800,12 @@ static int verify_dotfile(const char *re
+ 			break;
+ 		if (rest[3] == '\0' || is_dir_sep(rest[3]))
+ 			return 0;
++		if (S_ISLNK(mode)) {
++			rest += 3;
++			if (skip_iprefix(rest, "modules", &rest) &&
++			    (*rest == '\0' || is_dir_sep(*rest)))
++				return 0;
++		}
+ 		break;
+ 	case '.':
+ 		if (rest[1] == '\0' || is_dir_sep(rest[1]))
+@@ -805,7 +814,7 @@ static int verify_dotfile(const char *re
+ 	return 1;
+ }
+ 
+-int verify_path(const char *path)
++int verify_path(const char *path, unsigned mode)
+ {
+ 	char c;
+ 
+@@ -818,12 +827,25 @@ int verify_path(const char *path)
+ 			return 1;
+ 		if (is_dir_sep(c)) {
+ inside:
+-			if (protect_hfs && is_hfs_dotgit(path))
+-				return 0;
+-			if (protect_ntfs && is_ntfs_dotgit(path))
+-				return 0;
++			if (protect_hfs) {
++				if (is_hfs_dotgit(path))
++					return 0;
++				if (S_ISLNK(mode)) {
++					if (is_hfs_dotgitmodules(path))
++						return 0;
++				}
++			}
++			if (protect_ntfs) {
++				if (is_ntfs_dotgit(path))
++					return 0;
++				if (S_ISLNK(mode)) {
++					if (is_ntfs_dotgitmodules(path))
++						return 0;
++				}
++			}
++
+ 			c = *path++;
+-			if ((c == '.' && !verify_dotfile(path)) ||
++			if ((c == '.' && !verify_dotfile(path, mode)) ||
+ 			    is_dir_sep(c) || c == '\0')
+ 				return 0;
+ 		}
+@@ -1005,7 +1027,7 @@ static int add_index_entry_with_check(st
+ 
+ 	if (!ok_to_add)
+ 		return -1;
+-	if (!verify_path(ce->name))
++	if (!verify_path(ce->name, ce->ce_mode))
+ 		return error("Invalid path '%s'", ce->name);
+ 
+ 	if (!skip_df_check &&

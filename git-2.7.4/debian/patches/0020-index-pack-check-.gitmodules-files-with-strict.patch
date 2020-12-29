@@ -1,0 +1,171 @@
+From 73c3f0f704a91b6792e0199a3f3ab6e3a1971675 Mon Sep 17 00:00:00 2001
+From: Jeff King <peff@peff.net>
+Date: Fri, 4 May 2018 19:45:01 -0400
+Subject: [PATCH 19/20] index-pack: check .gitmodules files with --strict
+
+Now that the internal fsck code has all of the plumbing we
+need, we can start checking incoming .gitmodules files.
+Naively, it seems like we would just need to add a call to
+fsck_finish() after we've processed all of the objects. And
+that would be enough to cover the initial test included
+here. But there are two extra bits:
+
+  1. We currently don't bother calling fsck_object() at all
+     for blobs, since it has traditionally been a noop. We'd
+     actually catch these blobs in fsck_finish() at the end,
+     but it's more efficient to check them when we already
+     have the object loaded in memory.
+
+  2. The second pass done by fsck_finish() needs to access
+     the objects, but we're actually indexing the pack in
+     this process. In theory we could give the fsck code a
+     special callback for accessing the in-pack data, but
+     it's actually quite tricky:
+
+       a. We don't have an internal efficient index mapping
+	  oids to packfile offsets. We only generate it on
+	  the fly as part of writing out the .idx file.
+
+       b. We'd still have to reconstruct deltas, which means
+          we'd basically have to replicate all of the
+	  reading logic in packfile.c.
+
+     Instead, let's avoid running fsck_finish() until after
+     we've written out the .idx file, and then just add it
+     to our internal packed_git list.
+
+     This does mean that the objects are "in the repository"
+     before we finish our fsck checks. But unpack-objects
+     already exhibits this same behavior, and it's an
+     acceptable tradeoff here for the same reason: the
+     quarantine mechanism means that pushes will be
+     fully protected.
+
+In addition to a basic push test in t7415, we add a sneaky
+pack that reverses the usual object order in the pack,
+requiring that index-pack access the tree and blob during
+the "finish" step.
+
+This already works for unpack-objects (since it will have
+written out loose objects), but we'll check it with this
+sneaky pack for good measure.
+
+Signed-off-by: Jeff King <peff@peff.net>
+---
+ builtin/index-pack.c       |   10 ++++++++++
+ t/lib-pack.sh              |   12 ++++++++++++
+ t/t7415-submodule-names.sh |   38 ++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 60 insertions(+)
+
+Index: b/builtin/index-pack.c
+===================================================================
+--- a/builtin/index-pack.c
++++ b/builtin/index-pack.c
+@@ -834,6 +834,9 @@ static void sha1_object(const void *data
+ 				blob->object.flags |= FLAG_CHECKED;
+ 			else
+ 				die(_("invalid blob object %s"), sha1_to_hex(sha1));
++			if (do_fsck_object &&
++			    fsck_object(&blob->object, (void *)data, size, &fsck_options))
++				die(_("fsck error in packed object"));
+ 		} else {
+ 			struct object *obj;
+ 			int eaten;
+@@ -1447,6 +1450,9 @@ static void final(const char *final_pack
+ 	} else
+ 		chmod(final_index_name, 0444);
+ 
++	if (do_fsck_object)
++		add_packed_git(final_index_name, strlen(final_index_name), 0);
++
+ 	if (!from_stdin) {
+ 		printf("%s\n", sha1_to_hex(sha1));
+ 	} else {
+@@ -1798,6 +1804,10 @@ int cmd_index_pack(int argc, const char
+ 		      pack_sha1);
+ 	else
+ 		close(input_fd);
++
++	if (do_fsck_object && fsck_finish(&fsck_options))
++		die(_("fsck error in pack objects"));
++
+ 	free(objects);
+ 	strbuf_release(&index_name_buf);
+ 	strbuf_release(&keep_name_buf);
+Index: b/t/lib-pack.sh
+===================================================================
+--- a/t/lib-pack.sh
++++ b/t/lib-pack.sh
+@@ -79,6 +79,18 @@ pack_obj () {
+ 		;;
+ 	esac
+ 
++	# If it's not a delta, we can convince pack-objects to generate a pack
++	# with just our entry, and then strip off the header (12 bytes) and
++	# trailer (20 bytes).
++	if test -z "$2"
++	then
++		echo "$1" | git pack-objects --stdout >pack_obj.tmp &&
++		size=$(wc -c <pack_obj.tmp) &&
++		dd if=pack_obj.tmp bs=1 count=$((size - 20 - 12)) skip=12 &&
++		rm -f pack_obj.tmp
++		return
++	fi
++
+ 	echo >&2 "BUG: don't know how to print $1${2:+ (from $2)}"
+ 	return 1
+ }
+Index: b/t/t7415-submodule-names.sh
+===================================================================
+--- a/t/t7415-submodule-names.sh
++++ b/t/t7415-submodule-names.sh
+@@ -6,6 +6,7 @@ Exercise the name-checking function on a
+ real-world setup that confirms we catch this in practice.
+ '
+ . ./test-lib.sh
++. "$TEST_DIRECTORY"/lib-pack.sh
+ 
+ test_expect_success 'check names' '
+ 	cat >expect <<-\EOF &&
+@@ -84,4 +85,41 @@ test_expect_success 'transfer.fsckObject
+ 	test_must_fail git push dst.git HEAD
+ '
+ 
++test_expect_success 'transfer.fsckObjects detects evil superproject (index)' '
++	rm -rf dst.git &&
++	git init --bare dst.git &&
++	git -C dst.git config transfer.fsckObjects true &&
++	git -C dst.git config transfer.unpackLimit 1 &&
++	test_must_fail git push dst.git HEAD
++'
++
++# Normally our packs contain commits followed by trees followed by blobs. This
++# reverses the order, which requires backtracking to find the context of a
++# blob. We'll start with a fresh gitmodules-only tree to make it simpler.
++test_expect_success 'create oddly ordered pack' '
++	git checkout --orphan odd &&
++	git rm -rf --cached . &&
++	git add .gitmodules &&
++	git commit -m odd &&
++	{
++		pack_header 3 &&
++		pack_obj $(git rev-parse HEAD:.gitmodules) &&
++		pack_obj $(git rev-parse HEAD^{tree}) &&
++		pack_obj $(git rev-parse HEAD)
++	} >odd.pack &&
++	pack_trailer odd.pack
++'
++
++test_expect_success 'transfer.fsckObjects handles odd pack (unpack)' '
++	rm -rf dst.git &&
++	git init --bare dst.git &&
++	test_must_fail git -C dst.git unpack-objects --strict <odd.pack
++'
++
++test_expect_success 'transfer.fsckObjects handles odd pack (index)' '
++	rm -rf dst.git &&
++	git init --bare dst.git &&
++	test_must_fail git -C dst.git index-pack --strict --stdin <odd.pack
++'
++
+ test_done
